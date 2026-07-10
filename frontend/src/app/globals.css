@@ -1,0 +1,77 @@
+@import "tw-animate-css";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/*
+ * Material 3 -inspired token set, extracted from the ReceptionAI design
+ * reference (see DESIGN.md). Values are space-separated RGB channels so
+ * Tailwind's opacity modifiers (bg-primary/50, border-outline-variant/60)
+ * work correctly -- see tailwind.config.ts's rgb(var(--x) / <alpha-value>).
+ */
+@layer base {
+  :root {
+    /* shadcn-convention tokens (keep existing component compatibility) */
+    --background: 249 249 255; /* #f9f9ff */
+    --foreground: 21 28 39; /* #151c27 */
+    --card: 255 255 255;
+    --card-foreground: 21 28 39;
+    --popover: 255 255 255;
+    --popover-foreground: 21 28 39;
+    --primary: 0 104 86; /* #006856 */
+    --primary-foreground: 255 255 255;
+    --secondary: 231 238 254; /* #e7eefe */
+    --secondary-foreground: 21 28 39;
+    --muted: 240 243 255; /* #f0f3ff */
+    --muted-foreground: 62 73 69; /* #3e4945 */
+    --accent: 231 238 254;
+    --accent-foreground: 0 104 86;
+    --destructive: 186 26 26; /* #ba1a1a */
+    --destructive-foreground: 255 255 255;
+    --border: 189 201 196; /* #bdc9c4 */
+    --input: 189 201 196;
+    --ring: 0 104 86;
+    --radius: 0.75rem;
+
+    /* Material 3 surface scale */
+    --surface: 249 249 255;
+    --surface-container-lowest: 255 255 255;
+    --surface-container-low: 240 243 255;
+    --surface-container: 231 238 254;
+    --surface-container-high: 226 232 248;
+    --surface-container-highest: 220 226 243;
+
+    /* Material 3 semantic roles used by custom (non-shadcn) UI */
+    --outline: 110 122 117; /* #6e7a75 */
+    --outline-variant: 189 201 196; /* #bdc9c4 */
+    --on-surface: 21 28 39;
+    --on-surface-variant: 62 73 69;
+    --primary-container: 35 131 110; /* #23836e */
+    --on-primary-container: 244 255 250; /* #f4fffa */
+    --on-primary-fixed-variant: 0 81 66; /* #005142 -- text on light-teal chat bubble */
+    --tertiary: 143 71 56; /* #8f4738 */
+    --tertiary-container: 173 95 78; /* #ad5f4e */
+    --on-tertiary: 255 255 255;
+    --error-container: 255 218 214; /* #ffdad6 */
+    --on-error-container: 147 0 10; /* #93000a */
+  }
+  * {
+    @apply border-border;
+  }
+  body {
+    /* font-sans belongs here, not on html: the Geist CSS variables
+       (--font-geist-sans/--font-geist-mono) are defined via the font-loader
+       classes on <body> in layout.tsx. CSS custom properties only cascade
+       downward, so html { font-family: var(--font-geist-sans) } can never
+       resolve -- the var() fails, the whole font-family declaration is
+       invalid, and every element silently inherits the browser's default
+       serif font instead. */
+    @apply bg-background text-foreground font-sans;
+  }
+}

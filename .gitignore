@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+.next/
+dist/
+build/
+*.egg-info/
+.DS_Store
+postgres-data/
+cloudflared.exe
+
+# AI tool session state -- .codex/config.toml has held a live Supabase
+# access token; never let AI tool configs into version control.
+.codex/
+.claude/

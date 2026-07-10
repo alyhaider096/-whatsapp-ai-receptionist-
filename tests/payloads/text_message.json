@@ -1,0 +1,35 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "102345678901234",
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "15550001111",
+              "phone_number_id": "109876543210987"
+            },
+            "contacts": [
+              {
+                "profile": { "name": "Test Customer" },
+                "wa_id": "15559876543"
+              }
+            ],
+            "messages": [
+              {
+                "from": "15559876543",
+                "id": "wamid.HBgLMTU1NTk4NzY1NDMVAgARGBI1QTZBRUY4RkY2RUY4RkY4RkYA",
+                "timestamp": "1720000000",
+                "text": { "body": "What are your clinic timings?" },
+                "type": "text"
+              }
+            ]
+          },
+          "field": "messages"
+        }
+      ]
+    }
+  ]
+}
