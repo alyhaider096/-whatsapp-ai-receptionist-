@@ -15,6 +15,7 @@ from app.models.conversation import Conversation
 from app.models.handoff_event import HandoffEvent
 from app.models.lead import Lead
 from app.models.message import Message
+from app.models.sheet_config import SheetConfig
 from app.models.tenant import Tenant
 from app.models.webhook_event import WebhookEvent
 from app.models.whatsapp_config import WhatsAppConfig
@@ -24,11 +25,16 @@ from app.schemas.settings import (
     ConnectionStatusOut,
     LLMConfigIn,
     LLMConfigOut,
+    SheetConfigIn,
+    SheetConfigOut,
+    SheetsServiceAccountOut,
+    SheetsTestResult,
     TestInboundMessageIn,
     TestInboundMessageOut,
     WhatsAppConfigIn,
     WhatsAppConfigOut,
 )
+from app.services import sheets
 from app.services.agent_settings import get_agent_settings
 from app.worker.queue import enqueue_job
 
@@ -237,6 +243,75 @@ async def put_llm_config(
         model=config.model,
         api_key_masked=mask_secret(decrypt_secret(config.api_key_encrypted)),
     )
+
+
+@router.get("/sheets/service-account", response_model=SheetsServiceAccountOut)
+async def get_sheets_service_account(_user: CurrentUser):
+    settings = get_settings()
+    if not settings.google_service_account_json:
+        return SheetsServiceAccountOut(email=None)
+    import json
+
+    try:
+        account = json.loads(settings.google_service_account_json)
+    except ValueError:
+        return SheetsServiceAccountOut(email=None)
+    return SheetsServiceAccountOut(email=account.get("client_email"))
+
+
+@router.get("/sheets", response_model=SheetConfigOut | None)
+async def get_sheet_config(db: DbSession, tenant_id: TenantId, _user: CurrentUser):
+    config = await db.scalar(select(SheetConfig).where(SheetConfig.tenant_id == tenant_id))
+    if config is None:
+        return None
+    return SheetConfigOut(spreadsheet_id=config.spreadsheet_id, sheet_name=config.sheet_name)
+
+
+@router.put("/sheets", response_model=SheetConfigOut)
+async def put_sheet_config(
+    payload: SheetConfigIn, db: DbSession, tenant_id: TenantId, _user: CurrentUser
+):
+    config = await db.scalar(select(SheetConfig).where(SheetConfig.tenant_id == tenant_id))
+    if config is None:
+        config = SheetConfig(tenant_id=tenant_id)
+        db.add(config)
+
+    config.spreadsheet_id = payload.spreadsheet_id
+    config.sheet_name = payload.sheet_name
+    await db.commit()
+    await db.refresh(config)
+    return SheetConfigOut(spreadsheet_id=config.spreadsheet_id, sheet_name=config.sheet_name)
+
+
+@router.post("/sheets/test", response_model=SheetsTestResult)
+async def test_sheet_config(db: DbSession, tenant_id: TenantId, _user: CurrentUser):
+    config = await db.scalar(select(SheetConfig).where(SheetConfig.tenant_id == tenant_id))
+    if config is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Save a Spreadsheet ID first."
+        )
+
+    try:
+        header = await sheets.get_header_row(config.spreadsheet_id, config.sheet_name)
+    except sheets.SheetsNotConfigured:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google Sheets isn't configured on this deployment yet.",
+        )
+    except sheets.SheetsError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    if not header:
+        return SheetsTestResult(
+            ok=False, message="Sheet is empty -- add the header row first.", header_row=[]
+        )
+    if header != sheets.HEADER_ROW:
+        return SheetsTestResult(
+            ok=False,
+            message="Connected, but the header row doesn't match the expected columns.",
+            header_row=header,
+        )
+    return SheetsTestResult(ok=True, message="Connected successfully.", header_row=header)
 
 
 @router.get("/agent", response_model=AgentBehaviorOut)

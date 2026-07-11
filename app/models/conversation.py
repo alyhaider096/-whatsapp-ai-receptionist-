@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, Enum, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin
@@ -30,3 +30,7 @@ class Conversation(Base, TenantScopedMixin, TimestampMixin):
     assigned_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+    # Booking confirmation gate: {"type": "create"|"reschedule", "args": {...},
+    # "proposed_at": iso timestamp} while a proposed Sheets write is awaiting
+    # the customer's yes/no. Cleared on confirm, decline, or staleness.
+    pending_action: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

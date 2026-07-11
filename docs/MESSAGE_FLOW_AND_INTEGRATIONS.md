@@ -89,11 +89,21 @@ Store flow definitions per tenant as JSON, version them, and keep the worker
 linear. Do not add LangGraph until tool-calling and real multi-step booking are
 actually implemented.
 
-## Future integrations hub
+## Integrations hub
 
-Google Sheets, Google Calendar, and Cal.com are v2 modules. They should not be
-implemented in v1 because Sheets sync and booking/tool-calling are explicitly
-out of scope.
+**Google Sheets appointment booking is live**, not a future module anymore
+-- built via a shared Service Account, not OAuth (`app/services/sheets.py`,
+`app/models/sheet_config.py`). Each tenant shares their own Sheet with one
+service account email and pastes the Spreadsheet ID into the dashboard's
+Integrations page; no OAuth consent flow, no Google app-review wait. The
+bot uses LiteLLM tool-calling (`generate_reply_with_tools`, `BOOKING_TOOLS`
+in `app/services/llm.py`) to check availability, look up an existing
+booking by phone, and propose a booking/reschedule -- every write requires
+the customer to confirm with a yes/no reply first
+(`Conversation.pending_action`, gated in `app/worker/jobs.py`).
+
+Google Calendar and Cal.com are still future modules -- see "Build order"
+below for the confirmed next step.
 
 Meta Official WhatsApp onboarding is also a future module, separate from the
 current manual test-number settings. The business owner should connect it
@@ -128,17 +138,19 @@ Important constraints:
 
 Recommended future pages:
 
-- Integrations: connect/disconnect accounts and show sync health.
+- Integrations: connect/disconnect accounts and show sync health. Google
+  Sheets already has a real card here (Spreadsheet ID + tab + test
+  connection); Calendar and Cal.com are still frontend-only previews.
 - Meta Official WhatsApp: launch embedded signup, choose portfolio/WABA/phone,
   show webhook/subscription status, and disconnect/reconnect.
-- Google Sheets mapping: choose spreadsheet, tab, read/write mode, and field
-  mapping from lead fields to columns.
 - Calendar availability: choose calendar, timezone, working hours, buffer, and
   conflict rules.
 - Cal.com booking: choose event type, location, questions, and booking webhook
   behavior.
 
-Recommended backend shape:
+Recommended backend shape for the OAuth-based integrations still to come
+(Google Calendar, Shopify -- Sheets and Cal.com don't need this, both use
+simpler API-key/service-account auth with no OAuth consent flow):
 
 - `integration_accounts`: tenant_id, provider, encrypted refresh/access token,
   scopes, status, last_error.
@@ -155,15 +167,28 @@ Security rules:
 - Revoking an integration deletes or disables stored tokens immediately.
 - Sheets writes must be append/update by configured mapping only.
 - Calendar/Cal.com must never book unless a booking module has explicit user
-  confirmation and conflict checks.
+  confirmation and conflict checks (matches the propose/confirm gate already
+  built for Sheets).
 
 ## Build order
 
-1. Finish v1 receptionist: webhook, RAG, conversations, settings, handoff,
-   voice notes, diagnostics.
-2. Add a simple Flow Builder after the live AI receptionist is stable.
-3. Add Google OAuth and an integrations hub.
-4. Add Sheets read/write mapping.
-5. Add Calendar availability.
-6. Add Cal.com booking.
-7. Only then add real booking/tool-calling behavior to the WhatsApp worker.
+1. ~~Finish v1 receptionist~~ -- done.
+2. ~~Google Sheets appointment booking~~ -- done (Service Account model,
+   tool-calling, confirm-before-write). Needs a real service account key +
+   a shared test sheet from the business owner before it's live end-to-end.
+3. **Cal.com next, explicitly confirmed.** No OAuth review wait (API-key
+   based), ships fastest of the remaining integrations, direct booking
+   value. This is deliberately ahead of Google Calendar below, even though
+   an earlier draft of this doc had Calendar first -- worth re-confirming
+   this ordering with yourself if priorities shift, rather than letting it
+   silently drift again.
+4. Google Calendar availability -- needs real Google OAuth (unlike Sheets'
+   service-account model, read/write on someone's *personal* calendar
+   needs their own consent, which is where Google's app-review wait
+   actually applies).
+5. Shopify (OAuth + Admin API).
+6. Generic "connect your own database" connector -- read-only,
+   schema-restricted only; needs a dedicated security design pass before
+   any build (arbitrary customer-supplied DB credentials are a real
+   SSRF/credential-storage risk, not a quick add).
+7. A simple Flow Builder, once the above integrations are stable.

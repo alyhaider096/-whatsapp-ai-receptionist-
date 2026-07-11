@@ -19,7 +19,11 @@ _ENCODER = tiktoken.get_encoding("cl100k_base")
 CHUNK_SIZE_TOKENS = 500
 CHUNK_OVERLAP_TOKENS = 50
 TOP_K = 5
-MAX_COSINE_DISTANCE = 0.45
+# Calibrated against a real tenant's knowledge base + real customer phrasing:
+# on-topic queries (even with typos) scored 0.44-0.54 cosine distance against
+# the right chunk, genuinely unrelated queries scored 0.86+. 0.45 was
+# rejecting most real on-topic questions as false negatives.
+MAX_COSINE_DISTANCE = 0.65
 
 
 def chunk_text(

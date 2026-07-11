@@ -4,7 +4,7 @@ wa_message_id landing twice) must never send a second reply."""
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -19,12 +19,13 @@ from app.models.handoff_event import HandoffEvent
 from app.models.lead import Lead
 from app.models.llm_config import LLMConfig
 from app.models.message import Message
+from app.models.sheet_config import SheetConfig
 from app.models.tenant import Tenant
 from app.models.usage_log import UsageLog
 from app.models.user import User
 from app.models.webhook_event import WebhookEvent
 from app.models.whatsapp_config import WhatsAppConfig
-from app.services import meta, notifications, rag
+from app.services import meta, notifications, rag, sheets
 from app.services.agent_settings import DEFAULT_HANDOFF_MESSAGE, get_agent_settings
 from app.services.conversations import (
     detect_handoff_trigger,
@@ -32,7 +33,7 @@ from app.services.conversations import (
     get_or_create_conversation,
     is_within_service_window,
 )
-from app.services.llm import generate_reply, transcribe_audio
+from app.services.llm import BOOKING_TOOLS, generate_reply, generate_reply_with_tools, transcribe_audio
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +330,19 @@ async def _generate_and_send_reply(
     llm_config = await db.scalar(select(LLMConfig).where(LLMConfig.tenant_id == tenant_id))
     llm_api_key = decrypt_secret(llm_config.api_key_encrypted) if llm_config else None
 
+    sheet_config = None
+    if settings.google_service_account_json:
+        sheet_config = await db.scalar(select(SheetConfig).where(SheetConfig.tenant_id == tenant_id))
+
+    if conversation.pending_action:
+        handled = await _handle_pending_action_reply(
+            db=db, tenant_id=tenant_id, conversation=conversation, sheet_config=sheet_config,
+            whatsapp_config=whatsapp_config, access_token=access_token,
+            to=to, text=text, webhook_event=webhook_event,
+        )
+        if handled:
+            return
+
     trigger = detect_handoff_trigger(text)
     if trigger is not None:
         await _trigger_handoff(
@@ -362,7 +376,11 @@ async def _generate_and_send_reply(
         embedding_model=settings.default_embedding_model,
         api_key=llm_api_key,
     )
-    if not chunks:
+    # Booking tools (availability/find/propose) aren't answered from RAG at
+    # all, so a tenant with a Sheet connected skips the "no chunks -> hand
+    # off" gate -- the tool-enabled model decides for itself whether this is
+    # a booking request or an unanswerable FAQ.
+    if not chunks and sheet_config is None:
         await _trigger_handoff(
             db=db, tenant_id=tenant_id, conversation=conversation,
             whatsapp_config=whatsapp_config, access_token=access_token,
@@ -378,18 +396,41 @@ async def _generate_and_send_reply(
         limit=agent_settings["memory_window_messages"],
         exclude_message_ids=exclude_message_ids,
     )
-    reply_text = await generate_reply(
-        model=llm_config.model,
-        api_key=llm_api_key,
-        business_name=tenant.name,
-        tone=agent_settings["tone"],
-        context="\n\n".join(chunks),
-        user_message=text,
-        reply_mode=agent_settings["reply_mode"],
-        lead_fields=agent_settings["lead_fields"],
-        extra_instructions=agent_settings["extra_instructions"],
-        conversation_context=conversation_context,
-    )
+
+    if sheet_config is not None:
+        async def tool_executor(tool_name: str, tool_args: dict) -> str:
+            return await _execute_booking_tool(
+                tool_name, tool_args, db=db, conversation=conversation,
+                contact_phone=to, sheet_config=sheet_config,
+            )
+
+        reply_text = await generate_reply_with_tools(
+            model=llm_config.model,
+            api_key=llm_api_key,
+            business_name=tenant.name,
+            tone=agent_settings["tone"],
+            context="\n\n".join(chunks),
+            user_message=text,
+            tools=BOOKING_TOOLS,
+            tool_executor=tool_executor,
+            reply_mode=agent_settings["reply_mode"],
+            lead_fields=agent_settings["lead_fields"],
+            extra_instructions=agent_settings["extra_instructions"],
+            conversation_context=conversation_context,
+        )
+    else:
+        reply_text = await generate_reply(
+            model=llm_config.model,
+            api_key=llm_api_key,
+            business_name=tenant.name,
+            tone=agent_settings["tone"],
+            context="\n\n".join(chunks),
+            user_message=text,
+            reply_mode=agent_settings["reply_mode"],
+            lead_fields=agent_settings["lead_fields"],
+            extra_instructions=agent_settings["extra_instructions"],
+            conversation_context=conversation_context,
+        )
 
     sent = await _send_reply(
         db=db, tenant_id=tenant_id, conversation=conversation,
@@ -399,6 +440,156 @@ async def _generate_and_send_reply(
     if sent:
         db.add(UsageLog(tenant_id=tenant_id, message_count=1))
     await db.commit()
+
+
+_AFFIRMATIVE_WORDS = {
+    "yes", "yeah", "yep", "yup", "confirm", "confirmed", "ok", "okay", "sure",
+    "haan", "ji", "ji haan", "theek", "theek hai",
+}
+_NEGATIVE_WORDS = {"no", "nope", "cancel", "nahi", "don't", "dont", "wait"}
+PENDING_ACTION_TTL_MINUTES = 30
+
+
+async def _handle_pending_action_reply(
+    *, db, tenant_id, conversation, sheet_config, whatsapp_config, access_token, to, text, webhook_event,
+) -> bool:
+    """Returns True if this message was consumed as a yes/no answer to a
+    pending booking proposal (caller must not run the normal pipeline this
+    turn). Returns False to fall through to the normal pipeline -- either
+    the pending action was stale, or this message wasn't a clear answer."""
+    pending = conversation.pending_action
+    proposed_at = datetime.fromisoformat(pending["proposed_at"])
+    if datetime.now(timezone.utc) - proposed_at > timedelta(minutes=PENDING_ACTION_TTL_MINUTES):
+        conversation.pending_action = None
+        await db.commit()
+        return False
+
+    lowered = text.strip().lower()
+    is_yes = any(lowered == word or lowered.startswith(word + " ") for word in _AFFIRMATIVE_WORDS)
+    is_no = any(lowered == word or lowered.startswith(word + " ") for word in _NEGATIVE_WORDS)
+    if not is_yes and not is_no:
+        return False
+
+    if is_no or sheet_config is None:
+        conversation.pending_action = None
+        await db.commit()
+        await _send_reply(
+            db=db, tenant_id=tenant_id, conversation=conversation,
+            whatsapp_config=whatsapp_config, access_token=access_token,
+            to=to, body="No problem, that wasn't booked. Let me know if you'd like to try again.",
+            webhook_event=webhook_event,
+        )
+        return True
+
+    try:
+        if pending["type"] == "create":
+            a = pending["args"]
+            booking_id = await sheets.append_booking(
+                spreadsheet_id=sheet_config.spreadsheet_id, sheet_name=sheet_config.sheet_name,
+                name=a["name"], phone=a["phone"], service=a["service"], date=a["date"], time_=a["time"],
+            )
+            body = (
+                f"You're booked! {a['service']} on {a['date']} at {a['time']}. "
+                f"Your booking reference is {booking_id}."
+            )
+        else:
+            a = pending["args"]
+            updated = await sheets.update_booking(
+                spreadsheet_id=sheet_config.spreadsheet_id, sheet_name=sheet_config.sheet_name,
+                booking_id=a["booking_id"],
+                updates={"Date": a["new_date"], "Time": a["new_time"], "Status": "rescheduled"},
+            )
+            body = (
+                f"Done, you're rebooked for {a['new_date']} at {a['new_time']}."
+                if updated
+                else f"Couldn't find booking {a['booking_id']} to reschedule -- please double check the reference."
+            )
+    except sheets.SheetsError as exc:
+        body = f"Sorry, something went wrong saving that to the booking sheet: {exc}"
+
+    conversation.pending_action = None
+    await db.commit()
+    await _send_reply(
+        db=db, tenant_id=tenant_id, conversation=conversation,
+        whatsapp_config=whatsapp_config, access_token=access_token,
+        to=to, body=body, webhook_event=webhook_event,
+    )
+    return True
+
+
+async def _execute_booking_tool(
+    tool_name: str, tool_args: dict, *, db, conversation, contact_phone: str, sheet_config: SheetConfig
+) -> str:
+    """Executes one booking tool call and returns a plain-text result fed
+    back to the LLM for its final reply. Read tools (check_availability,
+    find_booking) hit the Sheet directly; propose_* tools never write --
+    they only stage a pending_action for the next message's yes/no gate."""
+    try:
+        if tool_name == "check_availability":
+            date = str(tool_args.get("date", "")).strip()
+            if not date:
+                return "No date was provided."
+            bookings = await sheets.list_bookings_for_date(
+                sheet_config.spreadsheet_id, sheet_config.sheet_name, date
+            )
+            if not bookings:
+                return f"No existing bookings found for {date} -- appears open."
+            taken = ", ".join(b.get("Time", "?") for b in bookings)
+            return f"Existing bookings on {date} at: {taken}."
+
+        if tool_name == "find_booking":
+            phone = str(tool_args.get("phone") or contact_phone)
+            bookings = await sheets.find_bookings_by_phone(
+                sheet_config.spreadsheet_id, sheet_config.sheet_name, phone
+            )
+            if not bookings:
+                return "No existing booking found for this phone number."
+            lines = [
+                f"Booking ID {b.get('Booking ID')}: {b.get('Service')} on {b.get('Date')} "
+                f"at {b.get('Time')} (status: {b.get('Status')})"
+                for b in bookings
+            ]
+            return "Found booking(s):\n" + "\n".join(lines)
+
+        if tool_name == "propose_booking":
+            args = {
+                "name": str(tool_args.get("name", "")).strip(),
+                "phone": str(tool_args.get("phone") or contact_phone).strip(),
+                "service": str(tool_args.get("service", "")).strip(),
+                "date": str(tool_args.get("date", "")).strip(),
+                "time": str(tool_args.get("time", "")).strip(),
+            }
+            conversation.pending_action = {
+                "type": "create", "args": args,
+                "proposed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await db.commit()
+            return (
+                f"Proposed booking (NOT yet confirmed): {args['name']}, {args['service']}, "
+                f"{args['date']} at {args['time']}, phone {args['phone']}. Tell the customer "
+                "this and ask them to reply YES to confirm, or say what to change."
+            )
+
+        if tool_name == "propose_reschedule":
+            args = {
+                "booking_id": str(tool_args.get("booking_id", "")).strip(),
+                "new_date": str(tool_args.get("new_date", "")).strip(),
+                "new_time": str(tool_args.get("new_time", "")).strip(),
+            }
+            conversation.pending_action = {
+                "type": "reschedule", "args": args,
+                "proposed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await db.commit()
+            return (
+                f"Proposed reschedule (NOT yet confirmed): booking {args['booking_id']} to "
+                f"{args['new_date']} at {args['new_time']}. Tell the customer this and ask "
+                "them to reply YES to confirm."
+            )
+
+        return f"Unknown tool: {tool_name}"
+    except sheets.SheetsError as exc:
+        return f"Couldn't access the booking sheet right now: {exc}"
 
 
 def _debounce_msgs_key(conversation_id) -> str:

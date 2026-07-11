@@ -113,6 +113,21 @@ export interface MessageOut {
   created_at: string;
 }
 
+export interface SheetConfigOut {
+  spreadsheet_id: string;
+  sheet_name: string;
+}
+
+export interface SheetsServiceAccountOut {
+  email: string | null;
+}
+
+export interface SheetsTestResult {
+  ok: boolean;
+  message: string;
+  header_row: string[];
+}
+
 export interface LeadOut {
   id: string;
   intent: string | null;

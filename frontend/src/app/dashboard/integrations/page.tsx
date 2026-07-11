@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -16,18 +17,12 @@ import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { api, ApiError } from "@/lib/api";
+import type { SheetConfigOut, SheetsServiceAccountOut, SheetsTestResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 
 const INTEGRATIONS = [
-  {
-    name: "Google Sheets",
-    icon: "table_chart",
-    status: "Planned",
-    description: "Send new leads to a selected sheet and optionally read FAQ-style rows later.",
-    setup: ["Connect Google", "Choose spreadsheet and tab", "Map lead fields to columns"],
-    fields: ["Phone", "Name", "Service", "Preferred time", "Status", "Notes"],
-    accent: "text-primary",
-  },
   {
     name: "Google Calendar",
     icon: "calendar_month",
@@ -126,6 +121,7 @@ export default function IntegrationsPage() {
       </Card>
 
       <div className="grid gap-4 xl:grid-cols-3">
+        <GoogleSheetsCard />
         {INTEGRATIONS.map((integration) => (
           <IntegrationCard key={integration.name} integration={integration} />
         ))}
@@ -211,6 +207,193 @@ export default function IntegrationsPage() {
         </Card>
       </div>
     </div>
+  );
+}
+
+function GoogleSheetsCard() {
+  const [serviceAccount, setServiceAccount] = useState<SheetsServiceAccountOut | null>(null);
+  const [config, setConfig] = useState<SheetConfigOut | null>(null);
+  const [spreadsheetId, setSpreadsheetId] = useState("");
+  const [sheetName, setSheetName] = useState("Appointments");
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<SheetsTestResult | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    Promise.all([
+      api.get<SheetsServiceAccountOut>("/settings/sheets/service-account"),
+      api.get<SheetConfigOut | null>("/settings/sheets"),
+    ])
+      .then(([account, cfg]) => {
+        setServiceAccount(account);
+        if (cfg) {
+          setConfig(cfg);
+          setSpreadsheetId(cfg.spreadsheet_id);
+          setSheetName(cfg.sheet_name);
+        }
+      })
+      .catch((err) => toast.error(err instanceof ApiError ? err.message : "Failed to load Sheets settings"))
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function handleSave(e: React.FormEvent) {
+    e.preventDefault();
+    if (!spreadsheetId.trim()) {
+      toast.error("Add a Spreadsheet ID first.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const cfg = await api.put<SheetConfigOut>("/settings/sheets", {
+        spreadsheet_id: spreadsheetId.trim(),
+        sheet_name: sheetName.trim() || "Appointments",
+      });
+      setConfig(cfg);
+      setTestResult(null);
+      toast.success("Sheet connection saved");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleTest() {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const result = await api.post<SheetsTestResult>("/settings/sheets/test");
+      setTestResult(result);
+      if (result.ok) toast.success(result.message);
+      else toast.error(result.message);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Test failed");
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  function copyEmail() {
+    if (!serviceAccount?.email) return;
+    navigator.clipboard.writeText(serviceAccount.email);
+    toast.success("Copied");
+  }
+
+  const notConfigured = !loading && !serviceAccount?.email;
+
+  return (
+    <Card className="border-outline-variant/60">
+      <CardContent className="flex h-full flex-col gap-4 p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-outline-variant/60 text-primary">
+              <Icon name="table_chart" size={21} />
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold text-on-surface">Google Sheets</h2>
+              <p className="text-xs text-on-surface-variant">
+                {config ? "Connected" : "Read/write appointment booking"}
+              </p>
+            </div>
+          </div>
+          <Badge variant={config ? "default" : "outline"}>{config ? "Live" : "Not connected"}</Badge>
+        </div>
+
+        <p className="text-sm leading-6 text-on-surface-variant">
+          The assistant can check availability, look up an existing booking by phone, propose a new
+          booking, and reschedule -- all reading and writing directly to your own Sheet. Every write
+          is confirmed with the customer first.
+        </p>
+
+        {notConfigured ? (
+          <div className="rounded-lg border border-outline-variant/60 bg-surface-container-low p-3 text-xs text-on-surface-variant">
+            Google Sheets isn&apos;t configured on this deployment yet -- ask your developer to add a
+            service account key.
+          </div>
+        ) : (
+          <>
+            <div className="rounded-lg border border-outline-variant/60 bg-surface-container-low p-3">
+              <div className="mb-1 text-xs font-medium text-on-surface">Share your Sheet with</div>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 truncate text-[11px] text-on-surface-variant">
+                  {loading ? "Loading..." : serviceAccount?.email}
+                </code>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7"
+                  onClick={copyEmail}
+                  disabled={loading}
+                >
+                  <Icon name="content_copy" size={14} />
+                </Button>
+              </div>
+              <p className="mt-1 text-[11px] text-on-surface-variant">
+                Give it Editor access, like sharing with a colleague.
+              </p>
+            </div>
+
+            <form onSubmit={handleSave} className="grid gap-3">
+              <div className="grid gap-1.5">
+                <Label htmlFor="sheet-id" className="text-xs">
+                  Spreadsheet ID
+                </Label>
+                <Input
+                  id="sheet-id"
+                  value={spreadsheetId}
+                  onChange={(e) => setSpreadsheetId(e.target.value)}
+                  placeholder="From the sheet's URL"
+                  className="h-9 text-sm"
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <Label htmlFor="sheet-tab" className="text-xs">
+                  Sheet/tab name
+                </Label>
+                <Input
+                  id="sheet-tab"
+                  value={sheetName}
+                  onChange={(e) => setSheetName(e.target.value)}
+                  placeholder="Appointments"
+                  className="h-9 text-sm"
+                />
+              </div>
+              <div className="flex gap-2">
+                <Button type="submit" size="sm" disabled={saving}>
+                  <Icon name="save" size={15} />
+                  {saving ? "Saving..." : "Save"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={testing || !config}
+                  onClick={handleTest}
+                >
+                  <Icon name="bolt" size={15} />
+                  {testing ? "Testing..." : "Test connection"}
+                </Button>
+              </div>
+            </form>
+
+            {testResult && (
+              <div
+                className={cn(
+                  "rounded-lg border p-3 text-xs",
+                  testResult.ok
+                    ? "border-primary/30 bg-primary-container/10 text-on-surface"
+                    : "border-error-container text-destructive",
+                )}
+              >
+                {testResult.message}
+              </div>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

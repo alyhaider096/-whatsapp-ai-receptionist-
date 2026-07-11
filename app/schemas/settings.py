@@ -35,6 +35,31 @@ class LLMConfigOut(BaseModel):
     api_key_masked: str
 
 
+class SheetConfigIn(BaseModel):
+    spreadsheet_id: str = Field(min_length=1, max_length=128)
+    sheet_name: str = Field(default="Appointments", min_length=1, max_length=64)
+
+    @field_validator("spreadsheet_id", "sheet_name", mode="before")
+    @classmethod
+    def strip_sheet_text(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
+
+
+class SheetConfigOut(BaseModel):
+    spreadsheet_id: str
+    sheet_name: str
+
+
+class SheetsServiceAccountOut(BaseModel):
+    email: str | None
+
+
+class SheetsTestResult(BaseModel):
+    ok: bool
+    message: str
+    header_row: list[str] = Field(default_factory=list)
+
+
 class GreetingMenuOptionIn(BaseModel):
     title: str = Field(min_length=1, max_length=24)
     description: str = Field(default="", max_length=72)

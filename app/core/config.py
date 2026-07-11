@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = True
     app_base_url: str = "http://localhost:3000"
 
+    # Google Sheets appointment booking -- one shared Service Account for
+    # the whole app; each tenant shares their own Sheet with its email and
+    # stores just the spreadsheet_id (see app/models/sheet_config.py). Blank
+    # means the booking tools are never registered (feature no-ops).
+    google_service_account_json: str = ""
+
     environment: str = "development"
 
 
