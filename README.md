@@ -1,5 +1,10 @@
 # WhatsApp AI Receptionist
 
+For a complete system overview -- architecture diagrams, the end-to-end
+message flow, the booking confirm-before-write flow, the data model, and an
+annotated file tree -- start with
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 Read [CLAUDE.md](CLAUDE.md) first, then [WHATSAPP_AI_RECEPTIONIST_DOCS.md](WHATSAPP_AI_RECEPTIONIST_DOCS.md)
 for the full spec. Planning history lives in the `my-brain` Obsidian vault
 (`wiki/ideas/WhatsApp AI Receptionist.md` and linked concept pages) — this repo
