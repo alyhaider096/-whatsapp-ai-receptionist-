@@ -103,4 +103,8 @@ export const api = {
       body: form.toString(),
       auth: false,
     }),
+  // No Content-Type header here -- the browser sets the multipart boundary
+  // itself when the body is a FormData instance, setting it manually breaks it.
+  postFile: <T>(path: string, formData: FormData) =>
+    request<T>(path, { method: "POST", body: formData }),
 };

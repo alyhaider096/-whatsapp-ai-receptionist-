@@ -21,8 +21,10 @@ const STATUS_VARIANT: Record<DocumentOut["status"], "default" | "secondary" | "d
 export default function KnowledgeBasePage() {
   const [documents, setDocuments] = useState<DocumentOut[]>([]);
   const [loading, setLoading] = useState(true);
+  const [mode, setMode] = useState<"text" | "pdf">("text");
   const [title, setTitle] = useState("");
   const [text, setText] = useState("");
+  const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   async function loadDocuments() {
@@ -43,12 +45,24 @@ export default function KnowledgeBasePage() {
 
   async function handleUpload(e: React.FormEvent) {
     e.preventDefault();
+    if (mode === "pdf" && !file) {
+      toast.error("Choose a PDF file first.");
+      return;
+    }
     setSubmitting(true);
     try {
-      await api.post("/documents", { title, text });
+      if (mode === "pdf" && file) {
+        const formData = new FormData();
+        formData.append("title", title);
+        formData.append("file", file);
+        await api.postFile("/documents/upload", formData);
+      } else {
+        await api.post("/documents", { title, text });
+      }
       toast.success("Document uploaded");
       setTitle("");
       setText("");
+      setFile(null);
       await loadDocuments();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Upload failed");
@@ -78,11 +92,33 @@ export default function KnowledgeBasePage() {
 
       <Card className="border-outline-variant/60">
         <CardContent className="p-4">
-          <div className="mb-4 flex items-center gap-3">
-            <div className="flex h-8 w-8 items-center justify-center rounded bg-surface-container text-on-surface-variant">
-              <Icon name="folder_data" size={18} />
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex h-8 w-8 items-center justify-center rounded bg-surface-container text-on-surface-variant">
+                <Icon name="folder_data" size={18} />
+              </div>
+              <h2 className="text-sm font-semibold text-on-surface">Upload a document</h2>
             </div>
-            <h2 className="text-sm font-semibold text-on-surface">Upload a document</h2>
+            <div className="flex gap-1 rounded-lg border border-outline-variant/60 p-0.5">
+              <button
+                type="button"
+                onClick={() => setMode("text")}
+                className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
+                  mode === "text" ? "bg-primary-container/30 text-on-surface" : "text-on-surface-variant"
+                }`}
+              >
+                Paste text
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode("pdf")}
+                className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
+                  mode === "pdf" ? "bg-primary-container/30 text-on-surface" : "text-on-surface-variant"
+                }`}
+              >
+                Upload PDF
+              </button>
+            </div>
           </div>
           <form onSubmit={handleUpload} className="flex flex-col gap-4">
             <div className="flex flex-col gap-2">
@@ -95,17 +131,33 @@ export default function KnowledgeBasePage() {
                 placeholder="e.g. Clinic FAQ"
               />
             </div>
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="doc-text">Content</Label>
-              <Textarea
-                id="doc-text"
-                required
-                rows={8}
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                placeholder="Paste the FAQ, pricing, timings, location, etc."
-              />
-            </div>
+            {mode === "text" ? (
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="doc-text">Content</Label>
+                <Textarea
+                  id="doc-text"
+                  required
+                  rows={8}
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  placeholder="Paste the FAQ, pricing, timings, location, etc."
+                />
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="doc-file">PDF file</Label>
+                <Input
+                  id="doc-file"
+                  type="file"
+                  accept="application/pdf"
+                  onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                />
+                <p className="text-xs text-on-surface-variant">
+                  Text-based PDFs only -- scanned/image PDFs without a text layer aren&apos;t
+                  supported yet. Max 10MB.
+                </p>
+              </div>
+            )}
             <Button type="submit" disabled={submitting} className="w-fit">
               {submitting ? "Uploading..." : "Upload"}
             </Button>
