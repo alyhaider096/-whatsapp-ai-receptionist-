@@ -239,13 +239,21 @@ BOOKING_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "find_booking",
-            "description": "Look up the customer's existing appointment booking(s) by phone number.",
+            "description": (
+                "Look up the customer's existing appointment booking(s) by phone number or "
+                "email. Some booking systems require an email to look up -- if this returns "
+                "asking for an email, ask the customer for it and call this again."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "phone": {
                         "type": "string",
                         "description": "Customer's phone number. Omit to use their WhatsApp number.",
+                    },
+                    "email": {
+                        "type": "string",
+                        "description": "Customer's email, only if they've given it or the system needs it.",
                     },
                 },
                 "required": [],
@@ -258,7 +266,9 @@ BOOKING_TOOLS: list[dict] = [
             "name": "propose_booking",
             "description": (
                 "Propose creating a new appointment. This does NOT book it yet -- it only "
-                "prepares a proposal for the customer to confirm with a yes/no reply."
+                "prepares a proposal for the customer to confirm with a yes/no reply. Some "
+                "booking systems require an email -- if this returns asking for one, ask the "
+                "customer and call again with it."
             ),
             "parameters": {
                 "type": "object",
@@ -267,6 +277,10 @@ BOOKING_TOOLS: list[dict] = [
                     "phone": {
                         "type": "string",
                         "description": "Customer's phone number. Omit to use their WhatsApp number.",
+                    },
+                    "email": {
+                        "type": "string",
+                        "description": "Customer's email, only if they've given it or the system needs it.",
                     },
                     "service": {"type": "string", "description": "What the appointment is for"},
                     "date": {"type": "string", "description": "YYYY-MM-DD"},

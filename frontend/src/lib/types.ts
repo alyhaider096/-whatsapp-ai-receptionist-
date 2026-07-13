@@ -128,6 +128,18 @@ export interface SheetsTestResult {
   header_row: string[];
 }
 
+export interface CalcomConfigOut {
+  api_key_masked: string;
+  event_type_id: number | null;
+  event_type_title: string | null;
+}
+
+export interface CalcomEventTypeOut {
+  id: number;
+  title: string;
+  length: number | null;
+}
+
 export interface LeadOut {
   id: string;
   intent: string | null;

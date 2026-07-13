@@ -1,4 +1,5 @@
 from app.models.audit_log import AuditLog
+from app.models.calcom_config import CalcomConfig
 from app.models.chunk import Chunk
 from app.models.contact import Contact
 from app.models.conversation import Conversation
@@ -17,6 +18,7 @@ from app.models.whatsapp_config import WhatsAppConfig
 
 __all__ = [
     "AuditLog",
+    "CalcomConfig",
     "Chunk",
     "Contact",
     "Conversation",

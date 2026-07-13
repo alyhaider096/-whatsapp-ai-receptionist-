@@ -10,6 +10,7 @@ from app.core.config import get_settings
 from app.core.deps import CurrentUser, DbSession, TenantId
 from app.core.security import decrypt_secret, encrypt_secret, mask_secret
 from app.models.llm_config import LLMConfig
+from app.models.calcom_config import CalcomConfig
 from app.models.contact import Contact
 from app.models.conversation import Conversation
 from app.models.handoff_event import HandoffEvent
@@ -22,6 +23,9 @@ from app.models.whatsapp_config import WhatsAppConfig
 from app.schemas.settings import (
     AgentBehaviorIn,
     AgentBehaviorOut,
+    CalcomConfigIn,
+    CalcomConfigOut,
+    CalcomEventTypeOut,
     ConnectionStatusOut,
     LLMConfigIn,
     LLMConfigOut,
@@ -34,7 +38,7 @@ from app.schemas.settings import (
     WhatsAppConfigIn,
     WhatsAppConfigOut,
 )
-from app.services import sheets
+from app.services import calcom, sheets
 from app.services.agent_settings import get_agent_settings
 from app.worker.queue import enqueue_job
 
@@ -312,6 +316,66 @@ async def test_sheet_config(db: DbSession, tenant_id: TenantId, _user: CurrentUs
             header_row=header,
         )
     return SheetsTestResult(ok=True, message="Connected successfully.", header_row=header)
+
+
+@router.get("/calcom", response_model=CalcomConfigOut | None)
+async def get_calcom_config(db: DbSession, tenant_id: TenantId, _user: CurrentUser):
+    config = await db.scalar(select(CalcomConfig).where(CalcomConfig.tenant_id == tenant_id))
+    if config is None:
+        return None
+    return CalcomConfigOut(
+        api_key_masked=mask_secret(decrypt_secret(config.api_key_encrypted)),
+        event_type_id=config.event_type_id,
+        event_type_title=config.event_type_title,
+    )
+
+
+@router.put("/calcom", response_model=CalcomConfigOut)
+async def put_calcom_config(
+    payload: CalcomConfigIn, db: DbSession, tenant_id: TenantId, _user: CurrentUser
+):
+    config = await db.scalar(select(CalcomConfig).where(CalcomConfig.tenant_id == tenant_id))
+    if config is None:
+        if payload.api_key is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Add a Cal.com API key before saving this connection.",
+            )
+        config = CalcomConfig(tenant_id=tenant_id)
+        db.add(config)
+
+    if payload.api_key is not None:
+        config.api_key_encrypted = encrypt_secret(payload.api_key)
+    if payload.event_type_id is not None:
+        config.event_type_id = payload.event_type_id
+    if payload.event_type_title is not None:
+        config.event_type_title = payload.event_type_title
+    await db.commit()
+    await db.refresh(config)
+
+    return CalcomConfigOut(
+        api_key_masked=mask_secret(decrypt_secret(config.api_key_encrypted)),
+        event_type_id=config.event_type_id,
+        event_type_title=config.event_type_title,
+    )
+
+
+@router.get("/calcom/event-types", response_model=list[CalcomEventTypeOut])
+async def list_calcom_event_types(db: DbSession, tenant_id: TenantId, _user: CurrentUser):
+    config = await db.scalar(select(CalcomConfig).where(CalcomConfig.tenant_id == tenant_id))
+    if config is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Save a Cal.com API key first."
+        )
+    api_key = decrypt_secret(config.api_key_encrypted)
+    try:
+        event_types = await calcom.list_event_types(api_key)
+    except calcom.CalcomError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return [
+        CalcomEventTypeOut(id=et["id"], title=et.get("title", "Untitled"), length=et.get("lengthInMinutes"))
+        for et in event_types
+    ]
 
 
 @router.get("/agent", response_model=AgentBehaviorOut)

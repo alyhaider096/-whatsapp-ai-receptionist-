@@ -6,12 +6,14 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from dateutil import parser as dateutil_parser
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import get_settings
 from app.core.security import decrypt_secret
 from app.db.session import async_session_maker
+from app.models.calcom_config import CalcomConfig
 from app.models.contact import Contact
 from app.models.conversation import Conversation
 from app.models.enums import ConversationStatus, LeadStatus, MessageDirection, MessageType, UserRole
@@ -25,7 +27,7 @@ from app.models.usage_log import UsageLog
 from app.models.user import User
 from app.models.webhook_event import WebhookEvent
 from app.models.whatsapp_config import WhatsAppConfig
-from app.services import meta, notifications, rag, sheets
+from app.services import calcom, meta, notifications, rag, sheets
 from app.services.agent_settings import DEFAULT_HANDOFF_MESSAGE, get_agent_settings
 from app.services.conversations import (
     detect_handoff_trigger,
@@ -340,9 +342,18 @@ async def _generate_and_send_reply(
     if settings.google_service_account_json:
         sheet_config = await db.scalar(select(SheetConfig).where(SheetConfig.tenant_id == tenant_id))
 
+    calcom_config = await db.scalar(select(CalcomConfig).where(CalcomConfig.tenant_id == tenant_id))
+    if calcom_config is not None and calcom_config.event_type_id is None:
+        calcom_config = None  # not usable until an event type is picked
+
+    # Cal.com takes priority if both happen to be configured -- a tenant is
+    # expected to use one booking backend at a time.
+    booking_provider = "calcom" if calcom_config is not None else ("sheets" if sheet_config is not None else None)
+
     if conversation.pending_action:
         handled = await _handle_pending_action_reply(
-            db=db, tenant_id=tenant_id, conversation=conversation, sheet_config=sheet_config,
+            db=db, tenant_id=tenant_id, conversation=conversation,
+            sheet_config=sheet_config, calcom_config=calcom_config,
             whatsapp_config=whatsapp_config, access_token=access_token,
             to=to, text=text, webhook_event=webhook_event,
         )
@@ -383,10 +394,10 @@ async def _generate_and_send_reply(
         api_key=llm_api_key,
     )
     # Booking tools (availability/find/propose) aren't answered from RAG at
-    # all, so a tenant with a Sheet connected skips the "no chunks -> hand
-    # off" gate -- the tool-enabled model decides for itself whether this is
-    # a booking request or an unanswerable FAQ.
-    if not chunks and sheet_config is None:
+    # all, so a tenant with a booking provider connected skips the "no
+    # chunks -> hand off" gate -- the tool-enabled model decides for itself
+    # whether this is a booking request or an unanswerable FAQ.
+    if not chunks and booking_provider is None:
         # No relevant chunks doesn't automatically mean "hand off" -- a
         # question clearly outside this business's domain (knee pain at an
         # eye clinic) should get a direct, honest decline, not an escalation
@@ -425,11 +436,12 @@ async def _generate_and_send_reply(
         exclude_message_ids=exclude_message_ids,
     )
 
-    if sheet_config is not None:
+    if booking_provider is not None:
         async def tool_executor(tool_name: str, tool_args: dict) -> str:
             return await _execute_booking_tool(
                 tool_name, tool_args, db=db, conversation=conversation,
-                contact_phone=to, sheet_config=sheet_config,
+                contact_phone=to, provider=booking_provider,
+                sheet_config=sheet_config, calcom_config=calcom_config,
             )
 
         reply_text = await generate_reply_with_tools(
@@ -478,8 +490,18 @@ _NEGATIVE_WORDS = {"no", "nope", "cancel", "nahi", "don't", "dont", "wait"}
 PENDING_ACTION_TTL_MINUTES = 30
 
 
+def _combine_date_time_iso(date_str: str, time_str: str) -> str:
+    """Best-effort combine of the LLM's separate date/time strings into an
+    ISO8601 UTC datetime for Cal.com. Assumes UTC since we don't currently
+    collect the tenant's timezone -- fine for a single-timezone business,
+    worth revisiting if that assumption breaks."""
+    combined = dateutil_parser.parse(f"{date_str} {time_str}")
+    return combined.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 async def _handle_pending_action_reply(
-    *, db, tenant_id, conversation, sheet_config, whatsapp_config, access_token, to, text, webhook_event,
+    *, db, tenant_id, conversation, sheet_config, calcom_config, whatsapp_config, access_token, to, text,
+    webhook_event,
 ) -> bool:
     """Returns True if this message was consumed as a yes/no answer to a
     pending booking proposal (caller must not run the normal pipeline this
@@ -498,7 +520,10 @@ async def _handle_pending_action_reply(
     if not is_yes and not is_no:
         return False
 
-    if is_no or sheet_config is None:
+    provider = pending.get("provider", "sheets")
+    provider_config = calcom_config if provider == "calcom" else sheet_config
+
+    if is_no or provider_config is None:
         conversation.pending_action = None
         await db.commit()
         await _send_reply(
@@ -510,30 +535,53 @@ async def _handle_pending_action_reply(
         return True
 
     try:
-        if pending["type"] == "create":
-            a = pending["args"]
-            booking_id = await sheets.append_booking(
-                spreadsheet_id=sheet_config.spreadsheet_id, sheet_name=sheet_config.sheet_name,
-                name=a["name"], phone=a["phone"], service=a["service"], date=a["date"], time_=a["time"],
-            )
-            body = (
-                f"You're booked! {a['service']} on {a['date']} at {a['time']}. "
-                f"Your booking reference is {booking_id}."
-            )
+        if provider == "calcom":
+            api_key = decrypt_secret(calcom_config.api_key_encrypted)
+            if pending["type"] == "create":
+                a = pending["args"]
+                start_iso = _combine_date_time_iso(a["date"], a["time"])
+                booking = await calcom.create_booking(
+                    api_key=api_key, event_type_id=calcom_config.event_type_id,
+                    start_iso=start_iso, name=a["name"], email=a["email"], phone=a.get("phone"),
+                )
+                body = (
+                    f"You're booked! {a['date']} at {a['time']}. "
+                    f"Your booking reference is {booking.get('uid', 'confirmed')}."
+                )
+            else:
+                a = pending["args"]
+                new_start_iso = _combine_date_time_iso(a["new_date"], a["new_time"])
+                await calcom.reschedule_booking(
+                    api_key=api_key, booking_uid=a["booking_id"], new_start_iso=new_start_iso,
+                )
+                body = f"Done, you're rebooked for {a['new_date']} at {a['new_time']}."
         else:
-            a = pending["args"]
-            updated = await sheets.update_booking(
-                spreadsheet_id=sheet_config.spreadsheet_id, sheet_name=sheet_config.sheet_name,
-                booking_id=a["booking_id"],
-                updates={"Date": a["new_date"], "Time": a["new_time"], "Status": "rescheduled"},
-            )
-            body = (
-                f"Done, you're rebooked for {a['new_date']} at {a['new_time']}."
-                if updated
-                else f"Couldn't find booking {a['booking_id']} to reschedule -- please double check the reference."
-            )
-    except sheets.SheetsError as exc:
-        body = f"Sorry, something went wrong saving that to the booking sheet: {exc}"
+            if pending["type"] == "create":
+                a = pending["args"]
+                booking_id = await sheets.append_booking(
+                    spreadsheet_id=sheet_config.spreadsheet_id, sheet_name=sheet_config.sheet_name,
+                    name=a["name"], phone=a["phone"], service=a["service"], date=a["date"], time_=a["time"],
+                )
+                body = (
+                    f"You're booked! {a['service']} on {a['date']} at {a['time']}. "
+                    f"Your booking reference is {booking_id}."
+                )
+            else:
+                a = pending["args"]
+                updated = await sheets.update_booking(
+                    spreadsheet_id=sheet_config.spreadsheet_id, sheet_name=sheet_config.sheet_name,
+                    booking_id=a["booking_id"],
+                    updates={"Date": a["new_date"], "Time": a["new_time"], "Status": "rescheduled"},
+                )
+                body = (
+                    f"Done, you're rebooked for {a['new_date']} at {a['new_time']}."
+                    if updated
+                    else f"Couldn't find booking {a['booking_id']} to reschedule -- please double check the reference."
+                )
+    except (sheets.SheetsError, calcom.CalcomError) as exc:
+        body = f"Sorry, something went wrong finalizing that booking: {exc}"
+    except (ValueError, OverflowError):
+        body = "Sorry, I couldn't understand that date/time -- could you confirm it again?"
 
     conversation.pending_action = None
     await db.commit()
@@ -546,13 +594,88 @@ async def _handle_pending_action_reply(
 
 
 async def _execute_booking_tool(
-    tool_name: str, tool_args: dict, *, db, conversation, contact_phone: str, sheet_config: SheetConfig
+    tool_name: str, tool_args: dict, *, db, conversation, contact_phone: str, provider: str,
+    sheet_config: SheetConfig | None, calcom_config: CalcomConfig | None,
 ) -> str:
     """Executes one booking tool call and returns a plain-text result fed
     back to the LLM for its final reply. Read tools (check_availability,
-    find_booking) hit the Sheet directly; propose_* tools never write --
-    they only stage a pending_action for the next message's yes/no gate."""
+    find_booking) hit the booking backend directly; propose_* tools never
+    write -- they only stage a pending_action (tagged with `provider`) for
+    the next message's yes/no gate."""
     try:
+        if provider == "calcom":
+            api_key = decrypt_secret(calcom_config.api_key_encrypted)
+
+            if tool_name == "check_availability":
+                date = str(tool_args.get("date", "")).strip()
+                if not date:
+                    return "No date was provided."
+                slots = await calcom.get_available_slots(
+                    api_key=api_key, event_type_id=calcom_config.event_type_id,
+                    start_date=date, end_date=date,
+                )
+                times = slots.get(date, [])
+                if not times:
+                    return f"No open slots found for {date}."
+                shown = ", ".join(str(t) for t in times[:10])
+                return f"Available slots on {date}: {shown}."
+
+            if tool_name == "find_booking":
+                email = str(tool_args.get("email") or "").strip()
+                if not email:
+                    return "This booking system looks up appointments by email -- ask the customer for their email and call this again."
+                bookings = await calcom.find_bookings_by_email(api_key=api_key, email=email)
+                if not bookings:
+                    return "No existing booking found for that email."
+                lines = [
+                    f"Booking ID {b.get('uid')}: {b.get('title', 'appointment')} starting {b.get('start')} "
+                    f"(status: {b.get('status')})"
+                    for b in bookings
+                ]
+                return "Found booking(s):\n" + "\n".join(lines)
+
+            if tool_name == "propose_booking":
+                email = str(tool_args.get("email") or "").strip()
+                if not email:
+                    return "This booking system requires an email to book -- ask the customer for their email and call this again."
+                args = {
+                    "name": str(tool_args.get("name", "")).strip(),
+                    "phone": str(tool_args.get("phone") or contact_phone).strip(),
+                    "email": email,
+                    "service": str(tool_args.get("service", "")).strip(),
+                    "date": str(tool_args.get("date", "")).strip(),
+                    "time": str(tool_args.get("time", "")).strip(),
+                }
+                conversation.pending_action = {
+                    "type": "create", "provider": "calcom", "args": args,
+                    "proposed_at": datetime.now(timezone.utc).isoformat(),
+                }
+                await db.commit()
+                return (
+                    f"Proposed booking (NOT yet confirmed): {args['name']}, {args['date']} at "
+                    f"{args['time']}, email {args['email']}. Tell the customer this and ask "
+                    "them to reply YES to confirm, or say what to change."
+                )
+
+            if tool_name == "propose_reschedule":
+                args = {
+                    "booking_id": str(tool_args.get("booking_id", "")).strip(),
+                    "new_date": str(tool_args.get("new_date", "")).strip(),
+                    "new_time": str(tool_args.get("new_time", "")).strip(),
+                }
+                conversation.pending_action = {
+                    "type": "reschedule", "provider": "calcom", "args": args,
+                    "proposed_at": datetime.now(timezone.utc).isoformat(),
+                }
+                await db.commit()
+                return (
+                    f"Proposed reschedule (NOT yet confirmed): booking {args['booking_id']} to "
+                    f"{args['new_date']} at {args['new_time']}. Tell the customer this and ask "
+                    "them to reply YES to confirm."
+                )
+
+            return f"Unknown tool: {tool_name}"
+
         if tool_name == "check_availability":
             date = str(tool_args.get("date", "")).strip()
             if not date:
@@ -588,7 +711,7 @@ async def _execute_booking_tool(
                 "time": str(tool_args.get("time", "")).strip(),
             }
             conversation.pending_action = {
-                "type": "create", "args": args,
+                "type": "create", "provider": "sheets", "args": args,
                 "proposed_at": datetime.now(timezone.utc).isoformat(),
             }
             await db.commit()
@@ -605,7 +728,7 @@ async def _execute_booking_tool(
                 "new_time": str(tool_args.get("new_time", "")).strip(),
             }
             conversation.pending_action = {
-                "type": "reschedule", "args": args,
+                "type": "reschedule", "provider": "sheets", "args": args,
                 "proposed_at": datetime.now(timezone.utc).isoformat(),
             }
             await db.commit()
@@ -616,8 +739,8 @@ async def _execute_booking_tool(
             )
 
         return f"Unknown tool: {tool_name}"
-    except sheets.SheetsError as exc:
-        return f"Couldn't access the booking sheet right now: {exc}"
+    except (sheets.SheetsError, calcom.CalcomError) as exc:
+        return f"Couldn't access the booking system right now: {exc}"
 
 
 def _debounce_msgs_key(conversation_id) -> str:

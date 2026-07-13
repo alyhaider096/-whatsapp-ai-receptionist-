@@ -54,6 +54,24 @@ class SheetsServiceAccountOut(BaseModel):
     email: str | None
 
 
+class CalcomConfigIn(BaseModel):
+    api_key: str | None = Field(default=None, min_length=1)
+    event_type_id: int | None = None
+    event_type_title: str | None = Field(default=None, max_length=255)
+
+
+class CalcomConfigOut(BaseModel):
+    api_key_masked: str
+    event_type_id: int | None
+    event_type_title: str | None
+
+
+class CalcomEventTypeOut(BaseModel):
+    id: int
+    title: str
+    length: int | None = None
+
+
 class SheetsTestResult(BaseModel):
     ok: bool
     message: str

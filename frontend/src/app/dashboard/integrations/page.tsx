@@ -18,7 +18,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { api, ApiError } from "@/lib/api";
-import type { SheetConfigOut, SheetsServiceAccountOut, SheetsTestResult } from "@/lib/types";
+import type {
+  CalcomConfigOut,
+  CalcomEventTypeOut,
+  SheetConfigOut,
+  SheetsServiceAccountOut,
+  SheetsTestResult,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -31,15 +37,6 @@ const INTEGRATIONS = [
     setup: ["Connect Google", "Choose calendar", "Set working hours and buffer"],
     fields: ["Calendar", "Timezone", "Working hours", "Buffer", "Conflict rule"],
     accent: "text-tertiary",
-  },
-  {
-    name: "Cal.com",
-    icon: "event_available",
-    status: "Planned",
-    description: "Use event types for booking links, confirmations, and webhook updates.",
-    setup: ["Connect Cal.com", "Choose event type", "Map booking questions"],
-    fields: ["Event type", "Location", "Duration", "Questions", "Webhook status"],
-    accent: "text-on-surface",
   },
 ];
 
@@ -122,6 +119,7 @@ export default function IntegrationsPage() {
 
       <div className="grid gap-4 xl:grid-cols-3">
         <GoogleSheetsCard />
+        <CalcomCard />
         {INTEGRATIONS.map((integration) => (
           <IntegrationCard key={integration.name} integration={integration} />
         ))}
@@ -391,6 +389,167 @@ function GoogleSheetsCard() {
               </div>
             )}
           </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function CalcomCard() {
+  const [config, setConfig] = useState<CalcomConfigOut | null>(null);
+  const [apiKey, setApiKey] = useState("");
+  const [eventTypes, setEventTypes] = useState<CalcomEventTypeOut[] | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [loadingEventTypes, setLoadingEventTypes] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api
+      .get<CalcomConfigOut | null>("/settings/calcom")
+      .then((cfg) => setConfig(cfg))
+      .catch((err) => toast.error(err instanceof ApiError ? err.message : "Failed to load Cal.com settings"))
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function handleSaveApiKey(e: React.FormEvent) {
+    e.preventDefault();
+    if (!apiKey.trim()) {
+      toast.error("Add your Cal.com API key first.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const cfg = await api.put<CalcomConfigOut>("/settings/calcom", { api_key: apiKey.trim() });
+      setConfig(cfg);
+      setApiKey("");
+      setEventTypes(null);
+      toast.success("Cal.com API key saved");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleLoadEventTypes() {
+    setLoadingEventTypes(true);
+    try {
+      const types = await api.get<CalcomEventTypeOut[]>("/settings/calcom/event-types");
+      setEventTypes(types);
+      if (types.length === 0) toast.error("No event types found on this Cal.com account.");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Failed to load event types");
+    } finally {
+      setLoadingEventTypes(false);
+    }
+  }
+
+  async function handlePickEventType(eventType: CalcomEventTypeOut) {
+    setSaving(true);
+    try {
+      const cfg = await api.put<CalcomConfigOut>("/settings/calcom", {
+        event_type_id: eventType.id,
+        event_type_title: eventType.title,
+      });
+      setConfig(cfg);
+      toast.success(`Using "${eventType.title}" for bookings`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Failed to save event type");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const connected = !loading && !!config;
+  const ready = connected && config?.event_type_id != null;
+
+  return (
+    <Card className="border-outline-variant/60">
+      <CardContent className="flex h-full flex-col gap-4 p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-outline-variant/60 text-primary">
+              <Icon name="event_available" size={21} />
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold text-on-surface">Cal.com</h2>
+              <p className="text-xs text-on-surface-variant">
+                {ready ? `Booking via "${config?.event_type_title}"` : "Check availability & book appointments"}
+              </p>
+            </div>
+          </div>
+          <Badge variant={ready ? "default" : "outline"}>{ready ? "Live" : "Not connected"}</Badge>
+        </div>
+
+        <p className="text-sm leading-6 text-on-surface-variant">
+          The assistant can check open slots, look up an existing booking by email, propose a new
+          booking, and reschedule -- directly against your Cal.com account. Every write is confirmed
+          with the customer first.
+        </p>
+
+        <div className="grid gap-1.5">
+          <Label htmlFor="calcom-key" className="text-xs">
+            API key
+          </Label>
+          <form onSubmit={handleSaveApiKey} className="flex gap-2">
+            <Input
+              id="calcom-key"
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={connected ? `Saved (${config?.api_key_masked})` : "cal_live_..."}
+              className="h-9 flex-1 text-sm"
+            />
+            <Button type="submit" size="sm" disabled={saving}>
+              <Icon name="save" size={15} />
+              {saving ? "Saving..." : "Save"}
+            </Button>
+          </form>
+          <p className="text-[11px] text-on-surface-variant">
+            From your Cal.com account under Settings &rarr; Developer &rarr; API keys.
+          </p>
+        </div>
+
+        {connected && (
+          <div className="grid gap-2">
+            <div className="flex items-center justify-between">
+              <Label className="text-xs">Event type</Label>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={loadingEventTypes}
+                onClick={handleLoadEventTypes}
+              >
+                <Icon name="refresh" size={14} />
+                {loadingEventTypes ? "Loading..." : "Load event types"}
+              </Button>
+            </div>
+            {eventTypes && (
+              <div className="flex flex-col gap-1.5">
+                {eventTypes.map((et) => (
+                  <button
+                    key={et.id}
+                    type="button"
+                    disabled={saving}
+                    onClick={() => handlePickEventType(et)}
+                    className={cn(
+                      "flex items-center justify-between rounded-lg border p-2.5 text-left text-xs transition-colors",
+                      config?.event_type_id === et.id
+                        ? "border-primary/50 bg-primary-container/10"
+                        : "border-outline-variant/60 hover:bg-surface-container-low",
+                    )}
+                  >
+                    <span className="font-medium text-on-surface">{et.title}</span>
+                    <span className="text-on-surface-variant">
+                      {et.length ? `${et.length} min` : ""}
+                      {config?.event_type_id === et.id ? " · Selected" : ""}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </CardContent>
     </Card>
