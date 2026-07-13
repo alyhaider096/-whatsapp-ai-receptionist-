@@ -33,7 +33,13 @@ from app.services.conversations import (
     get_or_create_conversation,
     is_within_service_window,
 )
-from app.services.llm import BOOKING_TOOLS, generate_reply, generate_reply_with_tools, transcribe_audio
+from app.services.llm import (
+    BOOKING_TOOLS,
+    classify_and_reply_off_topic,
+    generate_reply,
+    generate_reply_with_tools,
+    transcribe_audio,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -381,6 +387,28 @@ async def _generate_and_send_reply(
     # off" gate -- the tool-enabled model decides for itself whether this is
     # a booking request or an unanswerable FAQ.
     if not chunks and sheet_config is None:
+        # No relevant chunks doesn't automatically mean "hand off" -- a
+        # question clearly outside this business's domain (knee pain at an
+        # eye clinic) should get a direct, honest decline, not an escalation
+        # to a human who can't help with it either. Only genuinely
+        # plausible-but-undocumented questions still go to the handoff path.
+        off_topic_reply = await classify_and_reply_off_topic(
+            model=llm_config.model,
+            api_key=llm_api_key,
+            business_name=tenant.name,
+            user_message=text,
+        )
+        if off_topic_reply is not None:
+            sent = await _send_reply(
+                db=db, tenant_id=tenant_id, conversation=conversation,
+                whatsapp_config=whatsapp_config, access_token=access_token,
+                to=to, body=off_topic_reply, webhook_event=webhook_event,
+            )
+            if sent:
+                db.add(UsageLog(tenant_id=tenant_id, message_count=1))
+            await db.commit()
+            return
+
         await _trigger_handoff(
             db=db, tenant_id=tenant_id, conversation=conversation,
             whatsapp_config=whatsapp_config, access_token=access_token,

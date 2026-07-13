@@ -45,6 +45,50 @@ NO_CONTEXT_PLACEHOLDER = "(no business knowledge uploaded yet)"
 NO_RECENT_CONTEXT_PLACEHOLDER = "(no prior messages in this conversation)"
 NO_EXTRA_INSTRUCTIONS_PLACEHOLDER = "(none)"
 
+OFF_TOPIC_PROMPT_TEMPLATE = """You are the WhatsApp assistant for {business_name}.
+A customer just asked something you have no specific information about in
+your knowledge base: "{user_message}"
+
+Decide which of these two cases this is:
+
+CASE A -- clearly outside what a business like this would ever handle (for
+example, asking an eye clinic about knee pain, or asking a restaurant for
+legal advice). Reply with ONE short, polite message explaining this isn't
+something you handle, and if it's obviously a different kind of
+specialist/service, say so in one sentence. Do NOT offer to connect them
+with your team -- your team can't help with this either, so escalating
+would just waste everyone's time.
+
+CASE B -- plausibly something this business handles, just not documented
+here (a real question about this business's own services, pricing, hours,
+or policies that you simply don't have the specific answer to). Reply with
+exactly the text NEEDS_HUMAN and nothing else.
+
+Reply with either your CASE A message, or exactly NEEDS_HUMAN."""
+
+
+async def classify_and_reply_off_topic(
+    *, model: str, api_key: str, business_name: str, user_message: str
+) -> str | None:
+    """Called when RAG found no relevant chunks. Returns a customer-facing
+    decline message if the question is clearly outside this business's
+    domain (no human handoff needed -- a person can't help with this
+    either), or None if it's plausibly relevant and should still go to a
+    human via the normal handoff path."""
+    prompt = OFF_TOPIC_PROMPT_TEMPLATE.format(business_name=business_name, user_message=user_message)
+    response = await litellm.acompletion(
+        model=model,
+        api_key=api_key,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        max_tokens=150,
+    )
+    content = (response["choices"][0]["message"]["content"] or "").strip()
+    if content == "NEEDS_HUMAN" or content.startswith("NEEDS_HUMAN"):
+        return None
+    return content
+
+
 BOOKING_TOOLS_PROMPT_ADDENDUM = """
 You also have booking tools: check_availability, find_booking,
 propose_booking, propose_reschedule. Use them for anything about booking,
